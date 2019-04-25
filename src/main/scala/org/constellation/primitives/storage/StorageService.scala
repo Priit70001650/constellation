@@ -67,4 +67,6 @@ class StorageService[V](size: Int = 50000) extends Storage[IO, String, V] with L
     IO(lruCache.asMap().toMap)
 
   override def cacheSize(): Long = lruCache.estimatedSize()
+
+  def invalidateAll(): Unit = lruCache.invalidateAll()
 }

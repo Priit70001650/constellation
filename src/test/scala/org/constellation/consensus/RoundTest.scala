@@ -1,17 +1,20 @@
 package org.constellation.consensus
 
+import java.util.UUID
 import java.util.concurrent.Executors
 
 import akka.actor.{ActorSystem, Props}
 import akka.stream.ActorMaterializer
 import akka.testkit.{TestActorRef, TestKit, TestProbe}
+import better.files.File
 import cats.effect.IO
 import org.constellation.consensus.Round._
 import org.constellation.consensus.RoundManager.{BroadcastLightTransactionProposal, BroadcastSelectedUnionBlock, BroadcastUnionBlockProposal}
 import org.constellation.p2p.DataResolver
-import org.constellation.primitives.Schema.{CheckpointCacheData, NodeType, SignedObservationEdge}
+import org.constellation.primitives.CheckpointBlock.createCheckpointBlock
+import org.constellation.primitives.Schema.{CheckpointCacheData, Id, NodeType, SignedObservationEdge}
 import org.constellation.primitives._
-import org.constellation.primitives.storage.{MessageService, TransactionService}
+import org.constellation.primitives.storage.{CheckpointService, MessageService, TransactionService}
 import org.constellation.util.Metrics
 import org.constellation.{DAO, Fixtures, PeerMetadata}
 import org.mockito.integrations.scalatest.IdiomaticMockitoFixture
@@ -90,10 +93,14 @@ class RoundTest
 
   dao.threadSafeSnapshotService shouldReturn mock[ThreadSafeSnapshotService]
   dao.threadSafeSnapshotService.accept(*) shouldAnswer ((a: CheckpointCacheData) => ())
+  val f = File(s"tmp/${UUID.randomUUID()}/db").createDirectoryIfNotExists()
+  dao.dbPath shouldReturn f
+  val cs = new CheckpointService(dao)
+  dao.checkpointService shouldReturn cs
 
   val roundId = RoundId("round1")
 
-  val roundData = new RoundData(
+  val roundData = RoundData(
     roundId,
     Set(peerData1, peerData2),
     Set(),
@@ -103,9 +110,9 @@ class RoundTest
     Seq()
   )
 
-  val cb1 = CheckpointBlock.createCheckpointBlock(Seq(tx1), Seq(), Seq(), Seq())(dao.keyPair)
-  val cb2 = CheckpointBlock.createCheckpointBlock(Seq(tx2), Seq(), Seq(), Seq())(dao.keyPair)
-  val cb3 = CheckpointBlock.createCheckpointBlock(Seq(tx3), Seq(), Seq(), Seq())(dao.keyPair)
+  val cb1 = createCheckpointBlock(Seq(tx1), Seq(), Seq(), Seq())(dao.keyPair)
+  val cb2 = createCheckpointBlock(Seq(tx2), Seq(), Seq(), Seq())(dao.keyPair)
+  val cb3 = createCheckpointBlock(Seq(tx3), Seq(), Seq(), Seq())(dao.keyPair)
 
   val dataResolver = mock[DataResolver]
   val roundProbe = TestProbe()
@@ -383,4 +390,33 @@ class RoundTest
     round.underlyingActor.cancelCheckpointBlockProposalsTikTok() was called
   }
 
+  test("it should combine signatures when resolving majorityCheckpointBlock") {
+
+
+    val firstGroup =
+      Seq(
+        (asId("f1"), createCheckpointBlock(Seq(tx1), Seq(), Seq(), Seq())(Fixtures.tempKey1)),
+        (asId("f2"), createCheckpointBlock(Seq(tx1), Seq(), Seq(), Seq())(Fixtures.tempKey2)),
+        (asId("f3"), createCheckpointBlock(Seq(tx1), Seq(), Seq(), Seq())(Fixtures.tempKey3))
+      )
+
+    val secondGroup = Seq(
+      (asId("f4"), createCheckpointBlock(Seq(tx2), Seq(), Seq(), Seq())(Fixtures.tempKey4)),
+      (asId("f5"), createCheckpointBlock(Seq(tx2), Seq(), Seq(), Seq())(Fixtures.tempKey5))
+    )
+
+    (firstGroup ++ secondGroup).foreach(x => round ! UnionBlockProposal(roundId, x._1, x._2))
+
+    val majorityCheckpointBlock = round.underlyingActor.resolveMajorityCheckpointBlock().get
+
+    majorityCheckpointBlock.baseHash shouldBe firstGroup.head._2.baseHash
+    majorityCheckpointBlock.signatures should contain theSameElementsAs firstGroup.flatMap(
+      _._2.signatures
+    )
+    val conflictingCBs = dao.checkpointService.conflictingCheckpoints.toMapSync().values
+
+    conflictingCBs should contain theSameElementsAs Seq(secondGroup.map(_._2).reduceLeft(_ + _))
+  }
+
+  def asId(name: String) = FacilitatorId(Id(name))
 }

@@ -32,7 +32,6 @@ class Round(roundData: RoundData, dao: DAO, dataResolver: DataResolver) extends 
 
   private[consensus] var checkpointBlockProposalsTikTok: Cancellable = _
 
-  private[consensus] var majorityCheckpointBlock: Option[CheckpointBlock] = None
 
   override def receive: Receive = {
     case StartTransactionProposal(_) =>
@@ -213,20 +212,27 @@ class Round(roundData: RoundData, dao: DAO, dataResolver: DataResolver) extends 
     self ! blockProposal
   }
 
-  private[consensus] def resolveMajorityCheckpointBlock(): Unit = {
-    majorityCheckpointBlock = if (checkpointBlockProposals.nonEmpty) {
-      val sameBlocks = checkpointBlockProposals
+  private[consensus] def resolveMajorityCheckpointBlock(): Option[CheckpointBlock] = {
+    if (checkpointBlockProposals.nonEmpty) {
+      val reducedBlocks = checkpointBlockProposals
         .groupBy(_._2.baseHash)
-        .maxBy(_._2.size)
-        ._2
+        .map(c => c._2.values.reduceLeft(_ + _))
 
-      val checkpointBlock = sameBlocks.values.foldLeft(sameBlocks.head._2)(_ + _)
+      val mostSignedBlock = reducedBlocks.maxBy(cb => cb.signatures.size)
 
-      val selectedCheckpointBlock = SelectedUnionBlock(roundData.roundId, FacilitatorId(dao.id), checkpointBlock)
+      reducedBlocks
+      .filter(_.baseHash != mostSignedBlock.baseHash)
+      .map(cb => dao.checkpointService.conflictingCheckpoints.put(cb.baseHash, cb))
+      .toList
+      .sequence
+      .unsafeRunSync()
+
+
+      val selectedCheckpointBlock = SelectedUnionBlock(roundData.roundId, FacilitatorId(dao.id), mostSignedBlock)
       passToParentActor(BroadcastSelectedUnionBlock(roundData.peers, selectedCheckpointBlock))
       self ! selectedCheckpointBlock
 
-      Some(checkpointBlock)
+      Some(mostSignedBlock)
     } else None
   }
 

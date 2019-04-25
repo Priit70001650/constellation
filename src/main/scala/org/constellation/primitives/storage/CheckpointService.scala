@@ -5,6 +5,7 @@ import cats.effect.IO
 import cats.implicits._
 import org.constellation.DAO
 import org.constellation.datastore.swaydb.SwayDbConversions._
+import org.constellation.primitives.CheckpointBlock
 import org.constellation.primitives.Schema.CheckpointCacheData
 import swaydb.serializers.Default.StringSerializer
 
@@ -57,6 +58,7 @@ object CheckpointService {
 }
 
 class CheckpointService(dao: DAO, size: Int = 50000) {
+  val conflictingCheckpoints = new StorageService[CheckpointBlock](size)
   val memPool = new CheckpointBlocksMemPool(size)(dao)
   val midDb: MidDbStorage[String, CheckpointCacheData] = CheckpointBlocksMid(dao)
   val oldDb: DbStorage[String, CheckpointCacheData] = CheckpointBlocksOld(dao)
