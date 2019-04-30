@@ -178,7 +178,7 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
   }
 
   private[consensus] def unionProposals(): Unit = {
-
+    sendArbitraryDataProposalsTikTok.cancel()
     val readyPeers = dao.readyPeers
 
     val resolvedTxs = transactionProposals.values
