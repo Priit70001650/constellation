@@ -168,7 +168,7 @@ class ThreadSafeSnapshotService(concurrentTipService: ConcurrentTipService) {
         .foreach { h =>
           dao.checkpointService.memPool.putSync(h.checkpointBlock.get.baseHash, h)
           h.checkpointBlock.get.storeSOE()
-          dao.metrics.incrementMetric("checkpointAccepted")
+          dao.metrics.incrementMetric(Metrics.checkpointAccepted)
           h.checkpointBlock.get.transactions.foreach { _ =>
             dao.metrics.incrementMetric("transactionAccepted")
           }
@@ -255,7 +255,7 @@ class ThreadSafeSnapshotService(concurrentTipService: ConcurrentTipService) {
             // TODO: Make this a future and have it not break the unit test
             // Also make the db puts blocking, may help for different issue
             if (snapshot != Snapshot.snapshotZero) {
-              dao.metrics.incrementMetric("snapshotCount")
+              dao.metrics.incrementMetric(Metrics.snapshotCount)
 
               // Write snapshot to file
               tryWithMetric(
@@ -290,9 +290,8 @@ class ThreadSafeSnapshotService(concurrentTipService: ConcurrentTipService) {
                     dao.checkpointService.memPool.remove(snapshot.checkpointBlocks.toSet)
 
                     totalNumCBsInShapshots += snapshot.checkpointBlocks.size
-                    dao.metrics.updateMetric("totalNumCBsInShapshots",
-                                             totalNumCBsInShapshots.toString)
-                    dao.metrics.updateMetric("lastSnapshotHash", snapshot.hash)
+                    dao.metrics.updateMetric("totalNumCBsInShapshots", totalNumCBsInShapshots.toString)
+                    dao.metrics.updateMetric(Metrics.lastSnapshotHash, snapshot.hash)
                   }
                 )
                 .unsafeRunSync()
