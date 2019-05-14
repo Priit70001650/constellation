@@ -127,7 +127,7 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
       }
       scheduleArbitraryDataProposals(distance + 1)
 
-    case ResolveMajorityCheckpointBlock(_) => resolveMajorityCheckpointBlock()
+    case ResolveMajorityCheckpointBlock(_, triggeredFromTimeout) => resolveMajorityCheckpointBlock(triggeredFromTimeout)
 
     case AcceptMajorityCheckpointBlock(_) => acceptMajorityCheckpointBlock()
 
@@ -157,7 +157,7 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
         "constellation.consensus.checkpoint-block-proposals-timeout",
         15.second),
       self,
-      ResolveMajorityCheckpointBlock
+      ResolveMajorityCheckpointBlock(roundData.roundId, triggeredFromTimeout = true)
     )
 
   private[consensus] def receivedAllTransactionProposals: Boolean =
@@ -181,6 +181,26 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
 
     val readyPeers = dao.readyPeers
 
+    val transactions = transactionProposals.values
+      .flatMap(_.txHashes)
+      .filter(hash ⇒ dao.transactionService.contains(hash).unsafeRunSync())
+      .map(
+        hash ⇒
+          dao.transactionService
+            .lookup(hash)
+            .map(
+              _.map(_.transaction)
+            )
+      )
+      .toList
+      .sequence[IO, Option[Transaction]]
+      .map {
+        _.flatten.toSet
+          .union(roundData.transactions.toSet)
+          .toSeq
+      }
+      .unsafeRunSync()
+
     val resolvedTxs = transactionProposals.values
       .flatMap(proposal ⇒ proposal.txHashes.map(hash ⇒ (hash, proposal)))
       .filterNot(p ⇒ dao.transactionService.contains(p._1).unsafeRunSync())
@@ -197,22 +217,21 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
       .unsafeRunSync()
       .flatten
 
-    val transactions = transactionProposals.values
-      .flatMap(_.txHashes)
-      .filter(hash ⇒ dao.transactionService.contains(hash).unsafeRunSync())
+    val messages = transactionProposals.values
+      .flatMap(_.messages)
       .map(
         hash ⇒
-          dao.transactionService
+          dao.messageService
             .lookup(hash)
             .map(
-              _.map(_.transaction)
-          )
+              _.map(_.channelMessage)
+            )
       )
       .toList
-      .sequence[IO, Option[Transaction]]
+      .sequence[IO, Option[ChannelMessage]]
       .map {
         _.flatten.toSet
-          .union(roundData.transactions.toSet)
+          .union(roundData.messages.toSet)
           .toSeq
       }
       .unsafeRunSync()
@@ -233,30 +252,16 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
       .unsafeRunSync()
       .flatten
 
-    val messages = transactionProposals.values
-      .flatMap(_.messages)
-      .map(
-        hash ⇒
-          dao.messageService
-            .lookup(hash)
-            .map(
-              _.map(_.channelMessage)
-          )
-      )
-      .toList
-      .sequence[IO, Option[ChannelMessage]]
-      .map {
-        _.flatten.toSet
-          .union(roundData.messages.toSet)
-          .toSeq
-      }
-      .unsafeRunSync()
-
     val notifications = transactionProposals
       .flatMap(_._2.notifications)
       .toSet
       .union(roundData.peers.flatMap(_.notification))
       .toSeq
+
+    log.info(s"--------------- Messages: ${messages.size} + ${resolvedMessages.size}")
+//    if (messages.nonEmpty) {
+//      log.info(s"${messages.head.signedMessageData.data.hash} / ${resolvedMessages.head.signedMessageData.data.hash}")
+//    }
 
     val cb = CheckpointBlock.createCheckpointBlock(
       transactions ++ resolvedTxs,
@@ -269,12 +274,16 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
     self ! blockProposal
   }
 
-  private[consensus] def resolveMajorityCheckpointBlock(): Unit = {
+  private[consensus] def resolveMajorityCheckpointBlock(triggeredFromTimeout: Boolean): Unit = {
+    dao.metrics.incrementMetric("resolveMajorityCheckpointBlockActorTriggeredFromTimeout_" + triggeredFromTimeout)
+
     majorityCheckpointBlock = if (checkpointBlockProposals.nonEmpty) {
       val sameBlocks = checkpointBlockProposals
         .groupBy(_._2.baseHash)
         .maxBy(_._2.size)
         ._2
+
+      dao.metrics.incrementMetric("resolveMajorityCheckpointBlockProposalCount_" + checkpointBlockProposals.size)
 
       val checkpointBlock = sameBlocks.values.foldLeft(sameBlocks.head._2)(_ + _)
 
@@ -283,7 +292,10 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
       self ! selectedCheckpointBlock
 
       Some(checkpointBlock)
-    } else None
+    } else {
+      dao.metrics.incrementMetric("resolveMajorityCheckpointBlockProposalCount_0")
+      None
+    }
   }
 
   private[consensus] def acceptMajorityCheckpointBlock(): Unit = {
@@ -295,14 +307,22 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
 
       val checkpointBlock = sameBlocks.head._2
 
+      dao.metrics.incrementMetric("acceptMajorityCheckpointBlockSelectedCount_" + selectedCheckpointBlocks.size)
+
       val finalFacilitators = selectedCheckpointBlocks.keySet.map(_.id).toSet
       val cache = CheckpointCache(Some(checkpointBlock),
         height = checkpointBlock.calculateHeight())
       broadcastSignedBlockToNonFacilitators(FinishedCheckpoint(cache, finalFacilitators))
 
+      log.info(s"---------- Accept majority CB with messages: ${checkpointBlock.messages.size}")
+
       dao.threadSafeSnapshotService.accept(cache)
       Some(checkpointBlock)
-    } else None
+    } else {
+      log.info(s"---------- Accept majority CB - None")
+      dao.metrics.incrementMetric("acceptMajorityCheckpointBlockSelectedCount_0")
+      None
+    }
 
     passToParentActor(StopBlockCreationRound(roundData.roundId, acceptedBlock))
   }
@@ -352,7 +372,7 @@ object Round {
   case object UnionProposals
   case class ArbitraryDataProposals(distance: Int)
 
-  case class ResolveMajorityCheckpointBlock(roundId: RoundId) extends RoundCommand
+  case class ResolveMajorityCheckpointBlock(roundId: RoundId, triggeredFromTimeout: Boolean = false) extends RoundCommand
 
   case class AcceptMajorityCheckpointBlock(roundId: RoundId) extends RoundCommand
 

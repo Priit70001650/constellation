@@ -30,7 +30,7 @@ trait ConcurrentTipService {
 class TrieBasedTipService(sizeLimit: Int,
                           maxWidth: Int,
                           numFacilitatorPeers: Int,
-                          minPeerTimeAddedSeconds: Int)
+                          minPeerTimeAddedSeconds: Int)(implicit dao: DAO)
     extends ConcurrentTipService {
 
   private val conflictingTips: TrieMap[String, CheckpointBlock] = TrieMap.empty

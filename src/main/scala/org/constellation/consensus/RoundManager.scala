@@ -2,6 +2,7 @@ package org.constellation.consensus
 
 import akka.actor.{Actor, ActorContext, ActorLogging, ActorRef, Cancellable, Props}
 import cats.implicits._
+import io.micrometer.core.instrument.Timer
 import org.constellation.DAO
 import org.constellation.consensus.CrossTalkConsensus.{NotifyFacilitators, ParticipateInBlockCreationRound, StartNewBlockCreationRound}
 import org.constellation.consensus.Round._
@@ -33,7 +34,7 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
 
   override def receive: Receive = {
     case StartNewBlockCreationRound if ownRoundInProgress =>
-      log.debug(
+      log.info(
         s"Unable to initiate new round another round: ${rounds.filter(_._2.startedByThisNode)} is in progress"
       )
 
@@ -59,13 +60,14 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
             roundData.peers.flatMap(_.notification).toSeq
           )
         )
-            log.debug(s"node: ${dao.id.short} starting new round: ${roundData.roundId}")
+            log.info(s"node: ${dao.id.short} starting new round: ${roundData.roundId}")
             dao.blockFormationInProgress = true
+            dao.metrics.updateMetric("blockFormationInProgress", dao.blockFormationInProgress.toString)
         }
       }
 
     case cmd: ParticipateInBlockCreationRound =>
-      log.debug(s"node: ${dao.id.short} participating in round: ${cmd.roundData.roundId}")
+      log.info(s"node: ${dao.id.short} participating in round: ${cmd.roundData.roundId}")
       resolveMissingParents(cmd.roundData).onComplete {
         case Failure(e) =>
           log.error(e, s"unable to start block creation round due to: ${e.getMessage}")
@@ -82,6 +84,9 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
 
     case cmd: StopBlockCreationRound =>
       rounds.get(cmd.roundId).fold {} { round =>
+        dao.metrics.stopTimer("crosstalkConsensus", round.timer)
+        log.info(s"Stop block creation round")
+
         round.timeoutScheduler.cancel()
         if (round.startedByThisNode) {
           ownRoundInProgress = false
@@ -103,6 +108,7 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
       cmd.maybeCB.foreach(cb => dao.peerManager ! UpdatePeerNotifications(cb.notifications))
 
       dao.blockFormationInProgress = false
+      dao.metrics.updateMetric("blockFormationInProgress", dao.blockFormationInProgress.toString)
 
     case cmd: BroadcastLightTransactionProposal =>
       passToParentActor(cmd)
@@ -114,7 +120,7 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
       passToRoundActor(cmd)
 
     case cmd: ResolveMajorityCheckpointBlock =>
-      log.debug(
+      log.warning(
         s"node ${dao.id.short} Block formation timeout occurred for ${cmd.roundId} resolving majority CheckpointBlock"
       )
       passToRoundActor(cmd)
@@ -170,12 +176,14 @@ class RoundManager(roundTimeout: FiniteDuration)(implicit dao: DAO)
                  arbitraryMessages: Seq[(ChannelMessage, Int)],
                  startedByThisNode: Boolean = false): Unit = {
     rounds += roundData.roundId -> RoundInfo(
-      generateRoundActor(roundData, arbitraryTransactions,arbitraryMessages, dao),
+      generateRoundActor(roundData, arbitraryTransactions, arbitraryMessages, dao),
       context.system.scheduler.scheduleOnce(roundTimeout,
                                             self,
-                                            ResolveMajorityCheckpointBlock(roundData.roundId)),
-      startedByThisNode
+                                            ResolveMajorityCheckpointBlock(roundData.roundId, triggeredFromTimeout = true)),
+      startedByThisNode,
+      dao.metrics.startTimer
     )
+    log.info(s"Started round=${roundData.roundId}")
   }
 
   private[consensus] def passToRoundActor(cmd: RoundCommand): Unit = {
@@ -205,12 +213,12 @@ object RoundManager {
           .pullTips(dao.readyFacilitators())
           .map(tips => {
             val messages = dao.threadSafeMessageMemPool.pull().getOrElse(Seq())// TODO: Choose more than one tx and light peers
-            val firstTx = transactions.head
-            val lightPeers = if (dao.readyPeers(NodeType.Light).nonEmpty) {
+            val firstTx = transactions.headOption
+            val lightPeers = if (firstTx.isDefined && dao.readyPeers(NodeType.Light).nonEmpty) {
               Set(
                 dao
                   .readyPeers(NodeType.Light)
-                  .minBy(p => Distance.calculate(firstTx.baseHash, p._1))
+                  .minBy(p => Distance.calculate(firstTx.get.baseHash, p._1))
                   ._2
               )
             } else Set[PeerData]()
@@ -290,7 +298,8 @@ object RoundManager {
   case class RoundInfo(
     roundActor: ActorRef,
     timeoutScheduler: Cancellable,
-    startedByThisNode: Boolean = false
+    startedByThisNode: Boolean = false,
+    timer: Timer.Sample
   )
 
   case class BroadcastLightTransactionProposal(
