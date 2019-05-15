@@ -260,7 +260,7 @@ class Round(roundData: RoundData, arbitraryTransactions: Seq[(Transaction, Int)]
 
     val cb = CheckpointBlock.createCheckpointBlock(
       transactions ++ resolvedTxs,
-      roundData.tipsSOE.map(soe => TypedEdgeHash(soe.hash, EdgeHashType.CheckpointHash)),
+      roundData.tipsSOE.map(soe => TypedEdgeHash(soe.hash, EdgeHashType.CheckpointHash,Some(soe.baseHash))),
       messages ++ resolvedMessages,
       notifications
     )(dao.keyPair)

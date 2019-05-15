@@ -6,8 +6,9 @@ import java.util.concurrent.Executors
 import better.files.File
 import constellation._
 import org.constellation.crypto.KeyUtils.makeKeyPair
-import org.constellation.primitives.Schema.{CheckpointCache, Height, SignedObservationEdge}
+import org.constellation.primitives.Schema.{CheckpointCache, Height, Id, SignedObservationEdge}
 import org.constellation.primitives._
+import org.constellation.util.Metrics
 import org.constellation.{DAO, PeerMetadata}
 import org.mockito.integrations.scalatest.IdiomaticMockitoFixture
 import org.scalatest.{BeforeAndAfter, FunSuite, Matchers}
@@ -149,6 +150,12 @@ class CheckpointServiceTest
 
     val ts = new TransactionService(dao)
     dao.transactionService shouldReturn ts
+
+    dao.id shouldReturn Id("node1")
+    dao.keyPair shouldReturn makeKeyPair()
+
+    val metrics = new Metrics()(dao)
+    dao.metrics shouldReturn metrics
 
     dao
   }

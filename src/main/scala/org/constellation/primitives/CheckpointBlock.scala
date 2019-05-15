@@ -173,8 +173,21 @@ case class CheckpointBlock(
 
   def parentSOEHashes: Seq[String] = checkpoint.edge.parentHashes
 
-  def parentSOEBaseHashes()(implicit dao: DAO): Seq[String] =
-    parentSOEHashes.flatMap { dao.soeService.getSync }.map { _.signedObservationEdge.baseHash }
+  def parentSOEBaseHashes()(implicit dao: DAO): Seq[String] =  {
+    parentSOEHashes.flatMap { soeHash =>
+      val parent = dao.soeService.getSync(soeHash)
+      if (parent.isEmpty) {
+        dao.metrics.incrementMetric("parentSOEServiceQueryFailed")
+        // Temporary
+        val parentDirect = checkpoint.edge.observationEdge.parents.find(_.hash == soeHash).flatMap{_.baseHash}
+        if (parentDirect.isEmpty) {
+          dao.metrics.incrementMetric("parentDirectTipReferenceMissing")
+          //    throw new Exception("Missing parent direct reference")
+        }
+        parentDirect
+      } else parent.map{_.signedObservationEdge.baseHash}
+    }
+  }
 
   def soe: SignedObservationEdge = checkpoint.edge.signedObservationEdge
 
@@ -261,7 +274,7 @@ object DuplicatedTransaction {
   def apply(t: Transaction) = new DuplicatedTransaction(t.hash)
 }
 
-case class NoAddressCacheFound(txHash: String) extends CheckpointBlockValidation {
+case class NoAddressCacheFound(txHash: String, srcAddress: String) extends CheckpointBlockValidation {
 
   def errorMessage: String =
     s"CheckpointBlock includes transaction=$txHash which has no address cache"
@@ -269,7 +282,7 @@ case class NoAddressCacheFound(txHash: String) extends CheckpointBlockValidation
 
 object NoAddressCacheFound {
 
-  def apply(t: Transaction) = new NoAddressCacheFound(t.hash)
+  def apply(t: Transaction) = new NoAddressCacheFound(t.hash, t.src.address)
 }
 
 case class InsufficientBalance(address: String) extends CheckpointBlockValidation {
