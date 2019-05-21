@@ -11,7 +11,7 @@ import constellation.createTransaction
 import org.constellation.consensus.{EdgeProcessor, RandomData, Snapshot, SnapshotInfo}
 import org.constellation.primitives.CheckpointBlockValidatorNel._
 import org.constellation.primitives.Schema.{AddressCacheData, CheckpointCache, Id}
-import org.constellation.primitives.storage.CheckpointService
+import org.constellation.primitives.storage.{CheckpointService, TransactionService}
 import org.constellation.util.{HashSignature, Metrics}
 import org.constellation.{DAO, Fixtures, NodeConfig}
 import org.mockito.ArgumentMatchers._
@@ -30,6 +30,7 @@ class CheckpointBlockValidatorNelTest
   implicit val dao: DAO = mock[DAO]
 
   val snapService: ThreadSafeSnapshotService = mock[ThreadSafeSnapshotService]
+  val transactionService: TransactionService = mock[TransactionService]
   val checkpointService: CheckpointService = mock[CheckpointService]
 
   val leftBlock: CheckpointBlock = mock[CheckpointBlock]
@@ -39,8 +40,11 @@ class CheckpointBlockValidatorNelTest
   val rightParent: CheckpointBlock = mock[CheckpointBlock]
 
   val tx1: Transaction = mock[Transaction]
+  tx1.hash shouldReturn "tx1"
   val tx2: Transaction = mock[Transaction]
+  tx2.hash shouldReturn "tx2"
   val tx3: Transaction = mock[Transaction]
+  tx3.hash shouldReturn "tx3"
   val tx4: Transaction = mock[Transaction]
 
   before {
@@ -68,6 +72,8 @@ class CheckpointBlockValidatorNelTest
     leftBlock.transactions shouldReturn Seq(tx1, tx2)
     rightBlock.transactions shouldReturn Seq(tx3, tx4)
 
+    transactionService.containsAccepted shouldReturn (_ => IO.pure(false))
+    dao.transactionService shouldReturn transactionService
     dao.threadSafeSnapshotService shouldReturn snapService
     dao.checkpointService shouldReturn checkpointService
 
@@ -84,8 +90,9 @@ class CheckpointBlockValidatorNelTest
     ) shouldBe None
   }
 
-  test("it should detect no conflict and return None") {
-    isConflictingWithOthers(leftBlock, Seq(rightBlock)) shouldBe false
+  test("it should detect no conflict and return empty List") {
+    isConflictingWithOthers(leftBlock)
+      .unsafeRunSync() shouldBe List.empty
   }
 
   test("it should detect direct internal conflict with other tip") {
@@ -106,9 +113,9 @@ class CheckpointBlockValidatorNelTest
   }
 
   test("it should detect conflict with ancestry of other tip") {
-    rightParent.transactions shouldReturn Seq(tx2)
+    transactionService.containsAccepted shouldReturn (s => IO.pure(tx2.hash == s))
 
-    isConflictingWithOthers(leftBlock, Seq(rightBlock)) shouldBe true
+    isConflictingWithOthers(leftBlock).unsafeRunSync() shouldBe List("tx2")
   }
 
   test("it should get transactions from parent") {
@@ -119,7 +126,7 @@ class CheckpointBlockValidatorNelTest
 
     val combinedTxs =
       getTransactionsTillSnapshot(List(rightBlock))
-    combinedTxs shouldBe rightBlock.transactions ++ rightParent.transactions
+    combinedTxs shouldBe (rightBlock.transactions ++ rightParent.transactions).map(_.hash)
   }
 
   test("it should return false for cb not in snap") {
@@ -480,7 +487,8 @@ class ValidationSpec
         Seq(cb1, cb2, cb3, cb4, cb5, cb6, cb7)
           .foreach { cb =>
             // TODO: wkoszycki make one store function for CB
-            EdgeProcessor.acceptCheckpoint(CheckpointCache(Some(cb)))
+            dao.threadSafeSnapshotService.accept(CheckpointCache(Some(cb)))
+              .unsafeRunSync()
             //            cb.store(CheckpointCacheData(Some(cb)))
             //            cb.storeSOE()
           }

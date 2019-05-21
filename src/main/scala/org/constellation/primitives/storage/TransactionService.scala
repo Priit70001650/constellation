@@ -59,6 +59,9 @@ class TransactionService(dao: DAO, size: Int = 50000) extends MerkleService[Tran
   def contains: String ⇒ IO[Boolean] =
     DbStorage.extendedContains[String, TransactionCacheData](List(memPool, midDb, oldDb))
 
+  def containsAccepted: String ⇒ IO[Boolean] =
+    DbStorage.extendedContains[String, TransactionCacheData](List(midDb, oldDb))
+
   override def findHashesByMerkleRoot(merkleRoot: String): IO[Option[Seq[String]]] =
     merklePool.get(merkleRoot)
 }

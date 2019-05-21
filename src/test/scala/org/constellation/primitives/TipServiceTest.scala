@@ -3,11 +3,11 @@ import cats.effect.{ContextShift, IO}
 import cats.implicits._
 import org.constellation.DAO
 import org.constellation.consensus.TipData
+import org.constellation.crypto.KeyUtils
+import org.constellation.primitives.Schema.Id
 import org.constellation.util.Metrics
 import org.mockito.integrations.scalatest.IdiomaticMockitoFixture
 import org.scalatest.{FunSpecLike, Matchers}
-
-import scala.util.Try
 
 class TipServiceTest extends FunSpecLike with IdiomaticMockitoFixture with Matchers {
 
@@ -17,9 +17,12 @@ class TipServiceTest extends FunSpecLike with IdiomaticMockitoFixture with Match
 
   def prepareDAO(): DAO = {
     val dao = mock[DAO]
-    dao.metrics shouldReturn mock[Metrics]
+    dao.id shouldReturn Id("node1")
+    dao.keyPair shouldReturn KeyUtils.makeKeyPair()
     dao.threadSafeSnapshotService shouldReturn mock[ThreadSafeSnapshotService]
     dao.threadSafeSnapshotService.acceptedCBSinceSnapshot shouldReturn Seq.empty
+    val metrics = new Metrics()(dao)
+    dao.metrics shouldReturn metrics
     dao
   }
 
@@ -41,28 +44,6 @@ class TipServiceTest extends FunSpecLike with IdiomaticMockitoFixture with Match
       concurrentTipService.toMap.size shouldBe limit
     }
 
-    it("forbids adding conflicting tip") {
-      val limit = 6
-      val concurrentTipService = new TrieBasedTipService(limit, 10, 2, 30)
-      val txs = prepareTransactions()
-
-      val cbs = createIndexedCBmocks(limit * 3, { i =>
-        val cb = createCBMock(i.toString)
-        cb.transactions shouldReturn txs
-        cb
-      })
-
-      val tasks = createShiftedTasks(cbs.toList, { cb =>
-        concurrentTipService.update(cb)
-      })
-
-      val cbsNotInSnap = cbs.map(_.baseHash)
-      dao.threadSafeSnapshotService.acceptedCBSinceSnapshot shouldReturn cbsNotInSnap
-
-      tasks.par.foreach(_.unsafeRunAsyncAndForget)
-      Thread.sleep(2000)
-      concurrentTipService.toMap.size shouldBe 1
-    }
   }
 
   private def prepareTransactions(): Seq[Transaction] = {
@@ -74,7 +55,6 @@ class TipServiceTest extends FunSpecLike with IdiomaticMockitoFixture with Match
   private def createCBMock(hash: String) = {
     val cb = mock[CheckpointBlock]
     cb.parentSOEBaseHashes shouldReturn Seq.empty
-    cb.transactions shouldReturn Seq.empty
     cb.baseHash shouldReturn hash
     cb
   }
@@ -83,8 +63,10 @@ class TipServiceTest extends FunSpecLike with IdiomaticMockitoFixture with Match
     (1 to size).map(func)
   }
 
-  def createShiftedTasks(cbs: List[CheckpointBlock],
-                         func: CheckpointBlock => IO[Either[TipConflictException, Option[TipData]]]) =
+  def createShiftedTasks(
+    cbs: List[CheckpointBlock],
+    func: CheckpointBlock => IO[Option[TipData]]
+  ) =
     cbs.map(IO.shift *> func(_))
 
 }

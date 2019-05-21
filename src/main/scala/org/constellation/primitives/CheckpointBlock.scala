@@ -3,6 +3,7 @@ package org.constellation.primitives
 import java.security.KeyPair
 
 import cats.data.{Ior, NonEmptyList, ValidatedNel}
+import cats.effect.IO
 import cats.implicits._
 import constellation.signedObservationEdge
 import org.constellation.DAO
@@ -10,7 +11,6 @@ import org.constellation.primitives.Schema._
 import org.constellation.util.{HashSignature, Metrics}
 
 import scala.annotation.tailrec
-
 
 abstract class CheckpointEdgeLike(val checkpoint: CheckpointEdge) {
   def baseHash: String = checkpoint.edge.baseHash
@@ -47,8 +47,8 @@ case class CheckpointBlock(
   notifications: Seq[PeerNotification] = Seq()
 ) {
 
-  def storeSOE()(implicit dao: DAO): Unit = {
-    dao.soeService.putSync(soeHash, SignedObservationEdgeCache(soe, resolved = true))
+  def storeSOE()(implicit dao: DAO): IO[SignedObservationEdgeCache] = {
+    dao.soeService.put(soeHash, SignedObservationEdgeCache(soe, resolved = true))
   }
 
   def calculateHeight()(implicit dao: DAO): Option[Height] = {
@@ -103,7 +103,8 @@ case class CheckpointBlock(
 
   }
 
-  def transactionsValid(implicit dao: DAO): Boolean = transactions.nonEmpty && transactions.forall(_.valid)
+  def transactionsValid(implicit dao: DAO): Boolean =
+    transactions.nonEmpty && transactions.forall(_.valid)
 
   // TODO: Return checkpoint validation status for more info rather than just a boolean
 
@@ -154,6 +155,7 @@ case class CheckpointBlock(
 
   def soeHash: String = checkpoint.edge.signedObservationEdge.hash
 
+  // TODO: wkoszycki remove it
   def store(cache: CheckpointCache)(implicit dao: DAO): Unit = {
     /*
           transactions.foreach { rt =>
@@ -161,7 +163,7 @@ case class CheckpointBlock(
           }
      */
     // checkpoint.edge.storeCheckpointData(db, {prevCache: CheckpointCacheData => cache.plus(prevCache)}, cache, resolved)
-    dao.checkpointService.memPool.putSync(baseHash, cache)
+    dao.checkpointService.memPool.put(baseHash, cache).unsafeRunSync()
     dao.recentBlockTracker.put(cache)
 
   }
@@ -284,7 +286,8 @@ object DuplicatedTransaction {
   def apply(t: Transaction) = new DuplicatedTransaction(t.hash)
 }
 
-case class NoAddressCacheFound(txHash: String, srcAddress: String) extends CheckpointBlockValidation {
+case class NoAddressCacheFound(txHash: String, srcAddress: String)
+    extends CheckpointBlockValidation {
 
   def errorMessage: String =
     s"CheckpointBlock includes transaction=$txHash which has no address cache for address=$srcAddress"
@@ -323,7 +326,9 @@ sealed trait CheckpointBlockValidatorNel {
 
   type ValidationResult[A] = ValidatedNel[CheckpointBlockValidation, A]
 
-  def validateTransactionIntegrity(t: Transaction)(implicit dao: DAO): ValidationResult[Transaction] =
+  def validateTransactionIntegrity(
+    t: Transaction
+  )(implicit dao: DAO): ValidationResult[Transaction] =
     if (t.valid) t.validNel else InvalidTransaction(t).invalidNel
 
   def validateSourceAddressCache(t: Transaction)(implicit dao: DAO): ValidationResult[Transaction] =
@@ -510,23 +515,22 @@ sealed trait CheckpointBlockValidatorNel {
       }
     }
 
-    cbs.filterNot(isInSnapshot)
+    cbs
+      .filterNot(isInSnapshot)
       .flatMap(cb => getParentTransactions(getParents(cb), cb.transactions.map(_.hash)))
   }
 
-  def isConflictingWithOthers(cb: CheckpointBlock,
-                              others: Seq[CheckpointBlock])(implicit dao: DAO): Boolean = {
-    val cbs = dao.checkpointService.memPool.cacheSize()
-    val start = System.currentTimeMillis
+  def isConflictingWithOthers(cb: CheckpointBlock)(implicit dao: DAO): IO[List[String]] = {
     val startTimer = dao.metrics.startTimer
-    val result = false
-//    val result = cb.transactions.map(_.hash).intersect(getTransactionsTillSnapshot(others)).nonEmpty
-
-    val stop = System.currentTimeMillis
+    val containsAccepted = dao.transactionService.midDb.synchronized {
+      cb.transactions
+        .map(t => dao.transactionService.containsAccepted(t.hash).map(b => (t.hash, b)))
+        .toList
+        .sequence
+        .map(l => l.collect{ case (h, true) => h } )
+    }
     dao.metrics.stopTimer("isConflictingWithOthers", startTimer)
-    println(s"isConflictingWithOthers - elapsed: ${stop - start}ms for cbs: $cbs")
-
-    result
+    containsAccepted
   }
 
   def detectInternalTipsConflict(

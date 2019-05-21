@@ -4,6 +4,7 @@ import cats.implicits._
 import com.typesafe.scalalogging.StrictLogging
 import constellation._
 import org.constellation.DAO
+import org.constellation.consensus.EdgeProcessor
 import org.constellation.primitives.Schema.CheckpointCache
 import org.constellation.primitives.{ChannelMessageMetadata, TransactionCacheData}
 import org.constellation.util.PeerApiClient
@@ -129,7 +130,7 @@ class DataResolver extends StrictLogging {
       List(hash),
       "checkpoint",
       getReadyPeers(dao),
-      (t: CheckpointCache) => t.checkpointBlock.foreach(cb => cb.store(t)),
+      (t: CheckpointCache) => dao.threadSafeSnapshotService.accept(t),
       priorityClient
     ).head
   }
@@ -144,7 +145,7 @@ class DataResolver extends StrictLogging {
       List(hash),
       "checkpoint",
       pool,
-      (t: CheckpointCache) => t.checkpointBlock.foreach(cb => cb.store(t)),
+      (t: CheckpointCache) => dao.threadSafeSnapshotService.accept(t),
       priorityClient
     ).head
   }
@@ -158,7 +159,7 @@ class DataResolver extends StrictLogging {
       hashes,
       "checkpoint",
       pool,
-      (t: CheckpointCache) => t.checkpointBlock.foreach(cb => cb.store(t)),
+      (t: CheckpointCache) => dao.threadSafeSnapshotService.accept(t),
       priorityClient
     )
   }
